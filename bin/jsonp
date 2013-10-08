@@ -6,10 +6,38 @@ use warnings FATAL => 'all';
 use experimental 'smartmatch';
 
 use JSON;
+use Perl6::Slurp;
 use Method::Signatures;
+use Getopt::Long::Descriptive;
 
 $| = 1;
 
+
+my ($opts, $usage) = describe_options(
+	"%c %o '<perl program>'",
+	[ 'loop=s' => "don't loop over input lines; loop over this composite key instead" ],
+	[ 'help|h' => "this help message" ],
+	[],
+	[ q{your program is run in an implicit loop (like `perl -p`)} ],
+	[ q{the default loop is per line-of-input, but you can change that with --loop} ],
+	[ q{$j is set to the incoming JSON; by default, $_ is set to {}} ],
+	[ q{you can copy all of $j to $_ with clone() (ex: 'clone() if $j->{foo} eq "fred"')} ],
+	[ q{or copy only certain keys with copy() (ex: 'copy(qw< bar baz >) if $j->{foo} eq "fred"')} ],
+	[ q{if %$_ is non-empty at the end of the loop, it is converted back to JSON and printed} ],
+	[ q{or use `say` to print out whatever you like (ex: 'say $j->{bar} if $j->{foo} eq "fred"')} ],
+	[ q{the p() fuction returns a key from $j (ex: 'say p("bar") if p("foo") eq "fred"': same as above)} ],
+	[ q{a key to p() can be a "composite key": use "." to separate the levels} ],
+	[ q{  so these programs are equivalent: 'say $j->{foo}->{bar}->[0]->{baz}' and 'say p("foo.bar.0.baz")'} ],
+	[ q{composite keys can contain "*", meaning all values (ex: 'say $_->{baz} foreach p("foo.*.bar")')} ],
+	[ q{can also use composite keys with --loop (ex: jsonp --loop "foo.*.bar" 'say p("baz")': same as above)} ],
+	[ q{tsv() prints a tab-separated list of the supplied composite keys} ],
+	[ q{  so these are equivalent: 'say join("\t", p(qw< foo bar >))' and 'tsv(qw< foo bar >)'} ],
+	[ q{csv() is just like tsv(), but outputs comma-separated values (double-quoted)} ],
+	[ q{use count() if you just want to gather counts of different values} ],
+	[ q{  so these are similar: jsonp 'count(p("bar")) if p("foo") eq "fred"')} ],
+	[ q{    and this: jsonp 'say p("bar") if p("foo") eq "fred"' | sort | uniq -c} ],
+);
+print $usage->text and exit if $opts->help;
 
 my $prog = shift or die("usage: $0 'perl program to process json lines' [file ...]");
 our $j;
@@ -28,16 +56,28 @@ my $processor = q{
 $processor =~ s/##prog##/$prog/;
 eval $processor or die("$0: compile error: $@");
 
-while ( <> )
+if ($opts->loop)
 {
-	s/^.*?{/{/;
-	unless ( eval { $j = from_json($_) } )
+	$j = from_json(scalar slurp);
+	foreach (p($opts->loop))
 	{
-		die("couldn't find valid json string in input") if eof();
-		$_ .= <>;
-		redo;
+		local $j = $_;
+		process();
 	}
-	process();
+}
+else
+{
+	while ( <> )
+	{
+		s/^.*?{/{/;
+		unless ( eval { $j = from_json($_) } )
+		{
+			die("couldn't find valid json string in input") if eof();
+			$_ .= <>;
+			redo;
+		}
+		process();
+	}
 }
 
 if (%count_results)
