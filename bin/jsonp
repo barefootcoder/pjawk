@@ -3,6 +3,7 @@
 use 5.014;
 use autodie qw< :all >;
 use warnings FATAL => 'all';
+use experimental 'smartmatch';
 
 use JSON;
 use Method::Signatures;
@@ -47,17 +48,56 @@ if (%count_results)
 
 func p ($composite_key = $_)
 {
-	my $hash = $j;
-	foreach (split(/\./, $composite_key))
+	my $cur = $j;
+	my @keys = split(/\./, $composite_key);
+	while (@keys)
 	{
-		unless (exists $hash->{$_})
+		my $key = shift @keys;
+		if ($key eq '*')
 		{
-			return '';													# could also warn here
+			my @values;
+			$composite_key = join('.', @keys);
+			given (ref $cur)
+			{
+				@values = @$cur							when 'ARRAY';
+				@values = values %$cur					when 'HASH';
+				die("can't deref a scalar ($cur.*)");	# otherwise
+			}
+			my @subs;
+			foreach (@values)
+			{
+				local $j = $_;
+				push @subs, p($composite_key);
+			}
+			return wantarray ? @subs : \@subs;
 		}
-		$hash = $hash->{$_};
+
+		given (ref $cur)
+		{
+			when ('HASH')
+			{
+				exists $cur->{$key} or return '';						# could also warn here
+				$cur = $cur->{$key};
+			}
+			when ('ARRAY')
+			{
+				$key =~ /^\d+$/ and $key <= $#$cur or return '';		# could also warn here
+				$cur = $cur->[$key];
+			}
+			die("can't deref a scalar ($cur.$key)");
+		}
 	}
 
-	return $hash;
+	if (wantarray)
+	{
+		given (ref $cur)
+		{
+			return @$cur				when 'ARRAY';
+			return keys %$cur			when 'HASH';
+			return $cur					when '';
+		}
+	}
+	return $cur;
 }
 
 func copy (@keys)
