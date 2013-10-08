@@ -30,7 +30,12 @@ eval $processor or die("$0: compile error: $@");
 while ( <> )
 {
 	s/^.*?{/{/;
-	$j = from_json($_);
+	unless ( eval { $j = from_json($_) } )
+	{
+		die("couldn't find valid json string in input") if eof();
+		$_ .= <>;
+		redo;
+	}
 	process();
 }
 
