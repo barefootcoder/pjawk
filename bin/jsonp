@@ -15,8 +15,9 @@ $| = 1;
 
 my ($opts, $usage) = describe_options(
 	"%c %o '<perl program>'",
-	[ 'loop=s' => "don't loop over input lines; loop over this composite key instead" ],
-	[ 'help|h' => "this help message" ],
+	[ 'loop=s'    => "don't loop over input lines; loop over this composite key instead" ],
+	[ 'extra|E=s' => "extract this extra info from the line and add it to the JSON" ],
+	[ 'help|h'    => "this help message" ],
 	[],
 	[ q{your program is run in an implicit loop (like `perl -p`)} ],
 	[ q{the default loop is per line-of-input, but you can change that with --loop} ],
@@ -39,6 +40,15 @@ my ($opts, $usage) = describe_options(
 	[ q{use count() if you just want to gather counts of different values} ],
 	[ q{  so this prog:           jsonp 'count(:bar) if :foo eq "fred"')} ],
 	[ q{  is similar to this one: jsonp 'say :bar if :foo eq "fred"' | sort | uniq -c} ],
+	[ q{use --extra (or -E) to extract extra fields from each line} ],
+	[ q{  for instance, say each line had a datetime stamp, outside the JSON string} ],
+	[ q{  you might need this datetime as part of your data, but it won't be in $j because it's outside the JSON} ],
+	[ q{  so you might use: `--extra="timestamp => qr|\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}|"'} ],
+	[ q{  the arg to -E is Perl code representing one or more key/value pairs:} ],
+	[ q{    the key will be the name of the key inside $j (be careful not to overwrite an existing key)} ],
+	[ q{    the value must be a regex; the value inside $j will be whatever that matches in the string (could be undef)} ],
+	[ q{  multiple key/values are okay: `-E "date => qr|\d{4}/\d{2}/\d{2}|, ip => qr|(?:\d{1,3}\.){3}\d{1,3}|"'} ],
+	[ q{  --extra is ignored with --loop} ],
 );
 print $usage->text and exit if $opts->help;
 
@@ -61,6 +71,15 @@ my $processor = q{
 $processor =~ s/##prog##/$prog/;
 eval $processor or die("$0: compile error: $@");
 
+my %read_extra = ();
+if ($opts->extra)
+{
+	unless ( eval '%read_extra = (' . $opts->extra . ')' )
+	{
+		die("$0: compile error on extra fields: $@");
+	}
+}
+
 if ($opts->loop)
 {
 	$j = from_json(scalar slurp);
@@ -74,6 +93,16 @@ else
 {
 	while ( <> )
 	{
+		my %extra;
+		if (%read_extra)
+		{
+			foreach my $e (keys %read_extra)
+			{
+				m{($read_extra{$e})};
+				$extra{$e} = $1;
+			}
+		}
+
 		s/^.*?{/{/;
 		unless ( eval { $j = from_json($_) } )
 		{
@@ -81,6 +110,7 @@ else
 			$_ .= <>;
 			redo;
 		}
+		$j->{$_} = $extra{$_} foreach keys %extra;						# no-op if %extra is empty
 		process();
 	}
 }
