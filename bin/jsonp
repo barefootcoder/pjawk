@@ -212,5 +212,5 @@ func tsv (@values)
 
 func count ($value)
 {
-	++$count_results{$value};
+	++$count_results{$value // '<<undef>>'};
 }
