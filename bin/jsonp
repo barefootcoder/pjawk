@@ -8,6 +8,7 @@ use experimental 'smartmatch';
 use JSON;
 use Perl6::Slurp;
 use Method::Signatures;
+use List::Util qw< max >;
 use Getopt::Long::Descriptive;
 
 $| = 1;
@@ -32,6 +33,11 @@ my ($opts, $usage) = describe_options(
 	[ q{a key to path() can be a "composite key": use "." to separate the levels} ],
 	[ q{  so these programs are equivalent: 'say $j->{foo}->{bar}->[0]->{baz}' and 'say path("foo.bar.0.baz")'} ],
 	[ q{  the colon operator works with composite keys too: 'say :foo.bar.0.baz' is the same as the above two} ],
+	[ q{the path_exists() fuction takes a composite key and returns a boolen value if that key exists} ],
+	[ q{  if any part of the composite key doesn't exist, path_exists() returns false} ],
+	[ q{  a colon followed by a question mark then a keyname is a shortcut for this} ],
+	[ q{  (ex: 'clone if :?foo.bar' same as 'clone if path_exists("foo.bar")')} ],
+	[ q{  (both example are equivalent to 'clone if exists $j->{foo} and exists $j->{foo}->{bar}')} ],
 	[ q{composite keys can contain "*", meaning all values (ex: 'say $_->{baz} foreach :foo.*.bar')} ],
 	[ q{can also use composite keys with --loop (ex: jsonp --loop "foo.*.bar" 'say :baz': same as above)} ],
 	[ q{tsv() prints a tab-separated list of the supplied values} ],
@@ -40,6 +46,8 @@ my ($opts, $usage) = describe_options(
 	[ q{use count() if you just want to gather counts of different values} ],
 	[ q{  so this prog:           jsonp 'count(:bar) if :foo eq "fred"')} ],
 	[ q{  is similar to this one: jsonp 'say :bar if :foo eq "fred"' | sort | uniq -c} ],
+	[ q{  if something you count is undefined, it will be displayed as '<<undef>>'} ],
+	[ q{  you can pass count() multiple values; it will count each possible combination of the values} ],
 	[ q{use --extra (or -E) to extract extra fields from each line} ],
 	[ q{  for instance, say each line had a datetime stamp, outside the JSON string} ],
 	[ q{  you might need this datetime as part of your data, but it won't be in $j because it's outside the JSON} ],
@@ -117,7 +125,9 @@ else
 
 if (%count_results)
 {
-	say "$_ : $count_results{$_}" foreach sort keys %count_results;
+	my $key_len = max map { length } keys %count_results;
+	my $val_len = length max values %count_results;
+	printf "%-${key_len}s : %${val_len}d\n", $_, $count_results{$_} foreach sort keys %count_results;
 }
 
 
@@ -127,12 +137,32 @@ if (%count_results)
 
 func fixup_prog ($prog)
 {
-	$prog =~ s/:([\w.*-]+)/path(q{$1})/g;
+	use Text::Balanced qw< extract_quotelike extract_multiple >;
+	state $KEY_RE = qr/[\w.*-]+/;
+
+	# stash away quoted things so we don't get false positives
+	# (as ever, stolen shamelessly from Filter::Simple by The Damian)
+	my @quoted_strings;
+	$prog = join('', map { ref $_ ? scalar((push @quoted_strings, $_), "{Q$#quoted_strings}") : $_ }
+			extract_multiple($prog,
+			[
+					{ Q => sub { extract_quotelike($_[0]) } },
+					qr/./,
+			])
+	);
+
+	$prog =~ s/:($KEY_RE)/path(q{$1})/g;
+	$prog =~ s/:\?($KEY_RE)/path_exists(q{$1})/g;
+
+	$prog =~ s/{Q(\d+)}/${$quoted_strings[$1]}/g;						# put any quoted strings back
 	return $prog;
 }
 
 
-func path ($composite_key = $_)
+func path			($composite_key = $_) { _find_path($composite_key, check_existence => 0) }
+func path_exists	($composite_key = $_) { _find_path($composite_key, check_existence => 1) }
+
+func _find_path ($composite_key, :$check_existence)
 {
 	my $cur = $j;
 	my @keys = split(/\./, $composite_key);
@@ -162,18 +192,19 @@ func path ($composite_key = $_)
 		{
 			when ('HASH')
 			{
-				exists $cur->{$key} or return '';						# could also warn here
+				exists $cur->{$key} or return undef;					# could also warn here, if not $check_existence
 				$cur = $cur->{$key};
 			}
 			when ('ARRAY')
 			{
-				$key =~ /^\d+$/ and $key <= $#$cur or return '';		# could also warn here
+				$key =~ /^\d+$/ and $key <= $#$cur or return undef;		# could also warn here, if not $check_existence
 				$cur = $cur->[$key];
 			}
 			die("can't deref a scalar ($cur.$key)");
 		}
 	}
 
+	return 1 if $check_existence;										# if we've gotten this far, it exists
 	if (wantarray)
 	{
 		given (ref $cur)
@@ -210,7 +241,8 @@ func tsv (@values)
 	say join("\t", @values);
 }
 
-func count ($value)
+func count (@values)
 {
-	++$count_results{$value // '<<undef>>'};
+	my $key = join(' // ', map { $_ // '<<undef>>' } @values);
+	++$count_results{$key};
 }
