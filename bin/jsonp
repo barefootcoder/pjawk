@@ -7,25 +7,36 @@ use experimental 'smartmatch';
 
 use JSON;
 use Perl6::Slurp;
+use File::Basename;
 use Method::Signatures;
-use List::Util qw< max >;
 use Getopt::Long::Descriptive;
+use Scalar::Util qw< looks_like_number >;
+use List::Util qw< min max minstr maxstr sum >;
 
 $| = 1;
+
+my $ME = basename($0);
 
 
 my ($opts, $usage) = describe_options(
 	"%c %o '<perl program>'",
 	[ 'loop=s'    => "don't loop over input lines; loop over this composite key instead" ],
 	[ 'extra|E=s' => "extract this extra info from the line and add it to the JSON" ],
+	[ 'prefix|P'  => "whatever prefix is removed from the line (if any), add it back before printing out" ],
+	[ 'file|f=s'  => "instead of using the first argument as the program, use this file, which will contain the program" ],
 	[ 'help|h'    => "this help message" ],
+	[ 'debug'     => "print out the Perl code for the line processor (to stderr)" ],
 	[],
 	[ q{your program is run in an implicit loop (like `perl -p`)} ],
 	[ q{the default loop is per line-of-input, but you can change that with --loop} ],
 	[ q{$j is set to the incoming JSON; by default, $_ is set to {}} ],
 	[ q{you can copy all of $j to $_ with clone() (ex: 'clone() if $j->{foo} eq "fred"')} ],
 	[ q{or copy only certain keys with copy() (ex: 'copy(qw< bar baz >) if $j->{foo} eq "fred"')} ],
+	[ q{  keys that do not exist in $j are not copied to $_} ],
 	[ q{if %$_ is non-empty at the end of the loop, it is converted back to JSON and printed} ],
+	[ q{  if you use -P, anything before the actual JSON content in the incoming line is preserved in the outgoing} ],
+	[ q{  although if %$_ is empty, nothing is printed, so the prefix is discarded in that case} ],
+	[ q{  the prefix is stored in '$PREFIX', so you can modify it if you like} ],
 	[ q{or use `say` to print out whatever you like (ex: 'say $j->{bar} if $j->{foo} eq "fred"')} ],
 	[ q{the path() fuction returns a key from $j (ex: 'say path("bar") if path("foo") eq "fred"': same as above)} ],
 	[ q{  a colon followed by a keyname is a shortcut for path() (ex: 'say :bar if :foo eq "fred"': same as above)} ],
@@ -48,6 +59,13 @@ my ($opts, $usage) = describe_options(
 	[ q{  is similar to this one: jsonp 'say :bar if :foo eq "fred"' | sort | uniq -c} ],
 	[ q{  if something you count is undefined, it will be displayed as '<<undef>>'} ],
 	[ q{  you can pass count() multiple values; it will count each possible combination of the values} ],
+	[ q{you can also use stats() to gather statistics on one or more fields} ],
+	[ q{  for each key you specify, the count, count of NULLs, min value, and max value are displayed (at the end)} ],
+	[ q{  the count will be the same as the number of times you call stats()} ],
+	[ q{  the count of NULLs will include cases where the key doesn't exist} ],
+	[ q{  min and max values will be evaluated as numbers if both sides look like numbers, else as strings} ],
+	[ q{  calling stats() with multiple arguments and calling it multiple times are the same} ],
+	[ q{  so these programs are equivalent: 'stats(qw< datetime foo.bar >)' and 'stats("datetime"); stats("foo.bar")'} ],
 	[ q{use --extra (or -E) to extract extra fields from each line} ],
 	[ q{  for instance, say each line had a datetime stamp, outside the JSON string} ],
 	[ q{  you might need this datetime as part of your data, but it won't be in $j because it's outside the JSON} ],
@@ -60,31 +78,44 @@ my ($opts, $usage) = describe_options(
 );
 print $usage->text and exit if $opts->help;
 
-my $prog = shift or die("usage: $0 'perl program to process json lines' [file ...]");
+my $prog = $opts->file ? slurp($opts->file) : shift
+		or die("$ME: must supply perl program to process JSON lines (`$ME --help' for help)\n");
 $prog = fixup_prog($prog);
 
 our $j;
-our %count_results;
+our (%count_results, %stats_results);
 
+our $PREFIX = '';
 my $processor = q{
-	sub process
-	{
-		local $_ = {};
-		no warnings 'exiting';
-		##prog##;
-		say to_json($_) if %$_;
-	}
-	1;
+    sub process
+    {
+        local $_ = {};
+        no warnings 'exiting';
+        ##prog##;
+		if (%$_)
+		{
+			print $PREFIX if $opts->prefix;
+			say to_json($_);
+		}
+    }
+    1;
 };
 $processor =~ s/##prog##/$prog/;
-eval $processor or die("$0: compile error: $@");
+
+if ($opts->debug)
+{
+	say STDERR '>>>>> Perl processor:';
+	say STDERR $processor;
+	say STDERR '<<<<<';
+}
+eval $processor or die("$ME: compile error: $@");
 
 my %read_extra = ();
 if ($opts->extra)
 {
 	unless ( eval '%read_extra = (' . $opts->extra . ')' )
 	{
-		die("$0: compile error on extra fields: $@");
+		die("$ME: compile error on extra fields: $@");
 	}
 }
 
@@ -111,10 +142,10 @@ else
 			}
 		}
 
-		s/^.*?{/{/;
+		s/^(.*?){/{/ and $PREFIX = $1;
 		unless ( eval { $j = from_json($_) } )
 		{
-			die("couldn't find valid json string in input") if eof();
+			die("$ME: couldn't find valid json string in input") if eof();
 			$_ .= <>;
 			redo;
 		}
@@ -127,7 +158,22 @@ if (%count_results)
 {
 	my $key_len = max map { length } keys %count_results;
 	my $val_len = length max values %count_results;
-	printf "%-${key_len}s : %${val_len}d\n", $_, $count_results{$_} foreach sort keys %count_results;
+	my $grand_total = sum values %count_results;
+	printf "%-${key_len}s : %${val_len}d  (%5.2f%%)\n", $_, $count_results{$_}, $count_results{$_} / $grand_total * 100
+			foreach sort keys %count_results;
+}
+
+if (%stats_results)
+{
+	say '' if %count_results;
+	my $key_len = max map { length } keys %stats_results;
+	my $count_len = length max map { $stats_results{$_}->{count} } keys %stats_results;
+	my $count_undef_len = length max map { $stats_results{$_}->{count_undef} } keys %stats_results;
+	my $min_len = max map { length $stats_results{$_}->{min} } keys %stats_results;
+	my $max_len = max map { length $stats_results{$_}->{max} } keys %stats_results;
+	my $fmt = "Stats for %-${key_len}s || #:%${count_len}d | #undef:%${count_undef_len}d "
+			. "| min:%${min_len}s | max:%${max_len}s";
+	printf "$fmt\n", $_, @{$stats_results{$_}}{qw< count count_undef min max >} foreach sort keys %stats_results;
 }
 
 
@@ -147,12 +193,17 @@ func fixup_prog ($prog)
 			extract_multiple($prog,
 			[
 					{ Q => sub { extract_quotelike($_[0]) } },
+					{ C => qr/#.*?(?=\n)/ },							# eat comments, in case there's quotes in there
 					qr/./,
 			])
 	);
 
 	$prog =~ s/:($KEY_RE)/path(q{$1})/g;
 	$prog =~ s/:\?($KEY_RE)/path_exists(q{$1})/g;
+
+	# some whitespace niceties
+	$prog =~ s/^(\t+)/ ' ' x (4 * length($1)) /emg;						# poor man's `expand`
+	$prog =~ s/\n/\n        /g;											# indent for where it'll land in $processor
 
 	$prog =~ s/{Q(\d+)}/${$quoted_strings[$1]}/g;						# put any quoted strings back
 	return $prog;
@@ -175,9 +226,9 @@ func _find_path ($composite_key, :$check_existence)
 			$composite_key = join('.', @keys);
 			given (ref $cur)
 			{
-				@values = @$cur							when 'ARRAY';
-				@values = values %$cur					when 'HASH';
-				die("can't deref a scalar ($cur.*)");	# otherwise
+				@values = @$cur								when 'ARRAY';
+				@values = values %$cur						when 'HASH';
+				die("$ME: can't deref a scalar ($cur.*)");	# otherwise
 			}
 			my @subs;
 			foreach (@values)
@@ -200,7 +251,7 @@ func _find_path ($composite_key, :$check_existence)
 				$key =~ /^\d+$/ and $key <= $#$cur or return undef;		# could also warn here, if not $check_existence
 				$cur = $cur->[$key];
 			}
-			die("can't deref a scalar ($cur.$key)");
+			die("$ME: can't deref a scalar ($cur.$key)");
 		}
 	}
 
@@ -221,7 +272,10 @@ func copy (@keys)
 {
 	my $dest = $_;
 	local $_;
-	$dest->{$_} = path() foreach @keys;
+	foreach (@keys)
+	{
+		$dest->{$_} = path() if path_exists();
+	}
 }
 
 func clone ()
@@ -245,4 +299,30 @@ func count (@values)
 {
 	my $key = join(' // ', map { $_ // '<<undef>>' } @values);
 	++$count_results{$key};
+}
+
+func stats (@values)
+{
+	foreach (@values)
+	{
+		my $val = path($_);
+		my $stats = $stats_results{$_} // { min => undef, max => undef, count => 0, count_undef => 0 };
+		++$stats->{count};
+		++$stats->{count_undef} unless defined $val;
+		if (not defined $stats->{min})
+		{
+			$stats->{min} = $stats->{max} = $val;
+		}
+		elsif (looks_like_number $val)
+		{
+			$stats->{min} = looks_like_number($stats->{min}) ? min($stats->{min}, $val) : minstr($stats->{min}, $val);
+			$stats->{max} = looks_like_number($stats->{max}) ? max($stats->{max}, $val) : maxstr($stats->{max}, $val);
+		}
+		else
+		{
+			$stats->{min} = minstr($stats->{min}, $val);
+			$stats->{max} = maxstr($stats->{max}, $val);
+		}
+		$stats_results{$_} = $stats;
+	}
 }

@@ -3,4 +3,4 @@ jsonp
 
 See command line help:
 
-	`jsonp --help`
+	jsonp --help
