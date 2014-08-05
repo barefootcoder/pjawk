@@ -33,6 +33,8 @@ my ($opts, $usage) = describe_options(
 	[ q{you can copy all of $j to $_ with clone() (ex: 'clone() if $j->{foo} eq "fred"')} ],
 	[ q{or copy only certain keys with copy() (ex: 'copy(qw< bar baz >) if $j->{foo} eq "fred"')} ],
 	[ q{  keys that do not exist in $j are not copied to $_} ],
+	[ q{or just put arbitrary keys and values into $_ with build() (ex: 'build(f => $j->{foo}, b => $j->{bar})')} ],
+	[ q{  note that 'copy(qw< foo bar >)' is essentially just a shortcut for 'build(foo => $j->{foo}, bar => $j->{bar})'} ],
 	[ q{if %$_ is non-empty at the end of the loop, it is converted back to JSON and printed} ],
 	[ q{  if you use -P, anything before the actual JSON content in the incoming line is preserved in the outgoing} ],
 	[ q{  although if %$_ is empty, nothing is printed, so the prefix is discarded in that case} ],
@@ -44,7 +46,7 @@ my ($opts, $usage) = describe_options(
 	[ q{a key to path() can be a "composite key": use "." to separate the levels} ],
 	[ q{  so these programs are equivalent: 'say $j->{foo}->{bar}->[0]->{baz}' and 'say path("foo.bar.0.baz")'} ],
 	[ q{  the colon operator works with composite keys too: 'say :foo.bar.0.baz' is the same as the above two} ],
-	[ q{the path_exists() fuction takes a composite key and returns a boolen value if that key exists} ],
+	[ q{the path_exists() fuction takes a composite key and returns a boolean value if that key exists} ],
 	[ q{  if any part of the composite key doesn't exist, path_exists() returns false} ],
 	[ q{  a colon followed by a question mark then a keyname is a shortcut for this} ],
 	[ q{  (ex: 'clone if :?foo.bar' same as 'clone if path_exists("foo.bar")')} ],
@@ -145,7 +147,7 @@ else
 		s/^(.*?){/{/ and $PREFIX = $1;
 		unless ( eval { $j = from_json($_) } )
 		{
-			die("$ME: couldn't find valid json string in input") if eof();
+			die("$ME: couldn't find valid json string in input ($@)") if eof();
 			$_ .= <>;
 			redo;
 		}
@@ -266,6 +268,12 @@ func _find_path ($composite_key, :$check_existence)
 		}
 	}
 	return $cur;
+}
+
+func build (%data)
+{
+	my @keys = sort keys %data;
+	@$_{@keys} = @data{@keys};
 }
 
 func copy (@keys)
