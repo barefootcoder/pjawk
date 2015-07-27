@@ -61,6 +61,9 @@ my ($opts, $usage) = describe_options(
 	[ q{  is similar to this one: jsonp 'say :bar if :foo eq "fred"' | sort | uniq -c} ],
 	[ q{  if something you count is undefined, it will be displayed as '<<undef>>'} ],
 	[ q{  you can pass count() multiple values; it will count each possible combination of the values} ],
+	[ q{  you can also pass a limited number of options to count():} ],
+	[ q{    use 'total' to show grand totals:        jsonp 'count(:bar, {total=>1}) if :foo eq "fred"'} ],
+	[ q{    use 'top' to show only the top X counts: jsonp 'count(:bar, {top=>10}) if :foo eq "fred"'} ],
 	[ q{you can also use stats() to gather statistics on one or more fields} ],
 	[ q{  for each key you specify, the count, count of NULLs, min value, and max value are displayed (at the end)} ],
 	[ q{  the count will be the same as the number of times you call stats()} ],
@@ -68,6 +71,9 @@ my ($opts, $usage) = describe_options(
 	[ q{  min and max values will be evaluated as numbers if both sides look like numbers, else as strings} ],
 	[ q{  calling stats() with multiple arguments and calling it multiple times are the same} ],
 	[ q{  so these programs are equivalent: 'stats(qw< datetime foo.bar >)' and 'stats("datetime"); stats("foo.bar")'} ],
+	[ q{  you can also pass a limited number of options to stats():} ],
+	[ q{    use 'apply' to show stats for the result of a function applied to each value instead of the value itself} ],
+	[ q{      (ex: 'stats("url", {apply=>"length"})' to show stats for the length of URLs)} ],
 	[ q{use --extra (or -E) to extract extra fields from each line} ],
 	[ q{  for instance, say each line had a datetime stamp, outside the JSON string} ],
 	[ q{  you might need this datetime as part of your data, but it won't be in $j because it's outside the JSON} ],
@@ -85,7 +91,7 @@ my $prog = $opts->file ? slurp($opts->file) : shift
 $prog = fixup_prog($prog);
 
 our $j;
-our (%count_results, %stats_results);
+our (%count_results, $count_opts, %stats_results);
 
 our $PREFIX = '';
 my $processor = q{
@@ -159,10 +165,15 @@ else
 if (%count_results)
 {
 	my $key_len = max map { length } keys %count_results;
-	my $val_len = length max values %count_results;
 	my $grand_total = sum values %count_results;
-	printf "%-${key_len}s : %${val_len}d  (%5.2f%%)\n", $_, $count_results{$_}, $count_results{$_} / $grand_total * 100
-			foreach sort keys %count_results;
+	my $val_len = $count_opts->{total} ? length $grand_total : length max values %count_results;
+	my @results = $count_opts->{top}
+			? sort { $count_results{$b} <=> $count_results{$a} } keys %count_results
+			: sort keys %count_results;
+	splice @results, $count_opts->{top} if $count_opts->{top} and $count_opts->{top} < @results;
+	printf "%-${key_len}s : %${val_len}d  (%6.2f%%)\n", $_, $count_results{$_}, $count_results{$_} / $grand_total * 100
+			foreach @results;
+	printf "---\n%-${key_len}s : %${val_len}d  (%6.2f%%)\n", 'TOTALS:', $grand_total, 100 if $count_opts->{total};
 }
 
 if (%stats_results)
@@ -171,11 +182,12 @@ if (%stats_results)
 	my $key_len = max map { length } keys %stats_results;
 	my $count_len = length max map { $stats_results{$_}->{count} } keys %stats_results;
 	my $count_undef_len = length max map { $stats_results{$_}->{count_undef} } keys %stats_results;
-	my $min_len = max map { length $stats_results{$_}->{min} } keys %stats_results;
-	my $max_len = max map { length $stats_results{$_}->{max} } keys %stats_results;
+	my $min_len = max map { length($stats_results{$_}->{min} // '') } keys %stats_results;
+	my $max_len = max map { length($stats_results{$_}->{max} // '') } keys %stats_results;
 	my $fmt = "Stats for %-${key_len}s || #:%${count_len}d | #undef:%${count_undef_len}d "
 			. "| min:%${min_len}s | max:%${max_len}s";
-	printf "$fmt\n", $_, @{$stats_results{$_}}{qw< count count_undef min max >} foreach sort keys %stats_results;
+	printf "$fmt\n", $_, map { $_ // 0 } @{$stats_results{$_}}{qw< count count_undef min max >}
+			foreach sort keys %stats_results;
 }
 
 
@@ -305,32 +317,41 @@ func tsv (@values)
 
 func count (@values)
 {
+	$count_opts = ref $values[-1] eq 'HASH' ? pop @values : {};
 	my $key = join(' // ', map { $_ // '<<undef>>' } @values);
 	++$count_results{$key};
 }
 
 func stats (@values)
 {
+	my $opts = ref $values[-1] eq 'HASH' ? pop @values : {};
+
 	foreach (@values)
 	{
+		my $key = $opts->{apply} ? "$opts->{apply}(:$_)" : ":$_";
 		my $val = path($_);
-		my $stats = $stats_results{$_} // { min => undef, max => undef, count => 0, count_undef => 0 };
+		$val = eval $opts->{apply} . '($val)' if $opts->{apply};
+
+		my $stats = $stats_results{$key} // { min => undef, max => undef, count => 0, count_undef => 0 };
 		++$stats->{count};
 		++$stats->{count_undef} unless defined $val;
 		if (not defined $stats->{min})
 		{
 			$stats->{min} = $stats->{max} = $val;
 		}
-		elsif (looks_like_number $val)
+		elsif (defined $val)
 		{
-			$stats->{min} = looks_like_number($stats->{min}) ? min($stats->{min}, $val) : minstr($stats->{min}, $val);
-			$stats->{max} = looks_like_number($stats->{max}) ? max($stats->{max}, $val) : maxstr($stats->{max}, $val);
+			if (looks_like_number $val)
+			{
+				$stats->{min} = looks_like_number($stats->{min}) ? min($stats->{min}, $val) : minstr($stats->{min}, $val);
+				$stats->{max} = looks_like_number($stats->{max}) ? max($stats->{max}, $val) : maxstr($stats->{max}, $val);
+			}
+			else
+			{
+				$stats->{min} = minstr($stats->{min}, $val);
+				$stats->{max} = maxstr($stats->{max}, $val);
+			}
 		}
-		else
-		{
-			$stats->{min} = minstr($stats->{min}, $val);
-			$stats->{max} = maxstr($stats->{max}, $val);
-		}
-		$stats_results{$_} = $stats;
+		$stats_results{$key} = $stats;
 	}
 }
