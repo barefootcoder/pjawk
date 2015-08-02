@@ -2,7 +2,7 @@
 
 use 5.014;
 use autodie qw< :all >;
-use warnings FATAL => 'all';
+use warnings;
 use experimental 'smartmatch';
 
 use JSON;
