@@ -212,8 +212,8 @@ func fixup_prog ($prog)
 			])
 	);
 
-	$prog =~ s/:($KEY_RE)/path(q{$1})/g;
-	$prog =~ s/:\?($KEY_RE)/path_exists(q{$1})/g;
+	$prog =~ s/(?<!:):($KEY_RE)/path(q{$1})/g;
+	$prog =~ s/(?<!:):\?($KEY_RE)/path_exists(q{$1})/g;
 
 	# some whitespace niceties
 	$prog =~ s/^(\t+)/ ' ' x (4 * length($1)) /emg;						# poor man's `expand`
