@@ -330,7 +330,7 @@ func stats (@values)
 	{
 		my $key = $opts->{apply} ? "$opts->{apply}(:$_)" : ":$_";
 		my $val = path($_);
-		$val = eval $opts->{apply} . '($val)' if $opts->{apply};
+		$val = ref $opts->{apply} ? $opts->{apply}->($val) : eval $opts->{apply} . '($val)' if $opts->{apply};
 
 		my $stats = $stats_results{$key} // { min => undef, max => undef, count => 0, count_undef => 0 };
 		++$stats->{count};
